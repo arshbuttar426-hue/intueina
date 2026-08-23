@@ -1,0 +1,24 @@
+[package]
+name = "intueina"
+version = "0.4.0"
+edition = "2021"
+description = "Intueina exocortex — cognitive memory server for AI agents"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+parking_lot = "0.12"
+axum = { version = "0.8", features = ["macros", "ws"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
+# as/not_as protocol
+as-not-as-protocol = { path = "../../as-not-as-protocol" }
+
+[[bin]]
+name = "intueina"
+path = "src/main.rs"
