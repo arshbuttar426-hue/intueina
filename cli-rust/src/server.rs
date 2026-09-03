@@ -121,24 +121,19 @@ async fn recall(
     Json(body): Json<RecallRequest>,
 ) -> Json<Value> {
     let result = {
-        let prepared_opt = state.protocol.as_ref()
-            .and_then(|p| p.prepare(&body.query).ok());
-
-        match prepared_opt {
-            Some(prepared) => state.cortex.call(CortexCmd::RecallWithProtocol {
-                query: body.query.clone(),
-                density: body.density.unwrap_or_else(|| "balanced".into()),
-                limit: body.limit.unwrap_or(5),
-                think_in: vec![],
-                output_needed: vec![],
-                prepared,
-                model: state.embed_model.clone(),
-            }).await,
-            None => serde_json::json!({
-                "memories": [],
-                "tag_line": "[persona] query: | think_in: | output_needed:",
-            }),
-        }
+        // SPIM only — protocol with embeddings is retired, but recall must still work
+        let prepared = state.protocol.as_ref()
+            .and_then(|p| p.prepare(&body.query).ok())
+            .unwrap_or_else(|| as_not_as_protocol::scorer::PreparedScoring { query_vec: vec![0.0; 1], term_embeddings: vec![] });
+        state.cortex.call(CortexCmd::RecallWithProtocol {
+            query: body.query.clone(),
+            density: body.density.unwrap_or_else(|| "balanced".into()),
+            limit: body.limit.unwrap_or(5),
+            think_in: vec![],
+            output_needed: vec![],
+            prepared,
+            model: state.embed_model.clone(),
+        }).await
     };
 
     // Broadcast recall event

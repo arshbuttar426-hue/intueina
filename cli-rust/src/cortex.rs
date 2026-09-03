@@ -182,39 +182,17 @@ impl Cortex {
     ) -> Result<Vec<MemoryNode>, std::io::Error> {
         let effective_limit = match density { "minimal"=>3, "balanced"=>5, "dense"=>10, _=>limit };
         let inner = self.inner.lock();
-        // Inherent lexical understanding: expand query via 5-tag funnel at read time
-        // If query is single word, expand via its what/telic to find shared whats
+        eprintln!("[recall] q='{}' toks={:?} mems={} c3={:?}", query, tokenize(query), inner.num_memories, inner.match_c3(query).0);
+        // Inherent lexical understanding disabled for fresh DB single-word stability — use pure positional
         let query_words: Vec<String> = tokenize(query);
-        let mut expanded_hits: Vec<u32> = Vec::new();
-        if query_words.len()==1 {
-            let w = &query_words[0];
-            let tags = positional_memory::tag::tag(w);
-            // Find tag memories that share what prefix (macro) — e.g., puppy animal finds dog/cat via animal
-            let what_prefix = tags.what.split(':').nth(1).and_then(|s| s.split('_').next()).unwrap_or("");
-            if !what_prefix.is_empty() && what_prefix!="unknown" {
-                // Use and_query to find tag memories containing this what component (now stored as separate token "animal")
-                let tag_hits = inner.and_query(&[Box::leak(what_prefix.to_string().into_boxed_str()) as &str]);
-                // Collect original words from those tag memories
-                let mut related_words: Vec<String> = Vec::new();
-                for mid in tag_hits {
-                    if let Some(content) = inner.reconstruct_string(mid) {
-                        if let Some(word) = content.split_whitespace().next() {
-                            if word != w { related_words.push(word.to_string()); }
-                        }
-                    }
-                }
-                // Now find original memories containing those related words plus the query word
-                for rw in related_words {
-                    let hits = inner.and_query(&[rw.as_str()]);
-                    expanded_hits.extend(hits);
-                }
-            }
-        }
+        let expanded_hits: Vec<u32> = Vec::new();
         // Positional recall: try exact phrase first, then AND, then BM25, plus expanded hits
         let mut hits: Vec<u32> = inner.match_c3(query).0;
+        eprintln!("[recall] c3 hits={:?}", hits);
         if hits.is_empty() {
             let toks_ref: Vec<&str> = query_words.iter().map(|s| s.as_str()).collect();
             hits = inner.and_query(&toks_ref);
+            eprintln!("[recall] and_query {:?} hits={:?}", toks_ref, hits);
         }
         // Merge expanded lexical hits
         hits.extend(expanded_hits);
