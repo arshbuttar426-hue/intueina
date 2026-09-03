@@ -18,6 +18,7 @@ uuid = { version = "1", features = ["v4"] }
 
 # as/not_as protocol
 as-not-as-protocol = { path = "../../as-not-as-protocol" }
+positional_memory = { package = "spim-memory", path = "../../../spim-memory" }
 
 [[bin]]
 name = "intueina"
