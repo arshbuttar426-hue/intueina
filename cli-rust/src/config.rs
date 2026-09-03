@@ -19,11 +19,12 @@ impl Default for AppConfig {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         Self {
+            // SPIM only — single file, SPIM1 magic, no vectors
             cortex_db_path: format!("{}/.intueina/cortex.json", home),
             port: 9124,
             host: "127.0.0.1".into(),
-            embed_model: "Snowflake/snowflake-arctic-embed-m".into(),
-            embed_enabled: true,
+            embed_model: "spim-positional".into(),
+            embed_enabled: false,
         }
     }
 }
@@ -65,9 +66,10 @@ impl CortexActor {
                         let _ = cortex.ingest(&node_id, &content, "note");
                         let _ = reply.send(serde_json::json!({"stored": true}));
                     }
-                    CortexCmd::LearnWithEmbedding { node_id, content, embedding, model } => {
-                        let _ = cortex.ingest_with_embedding(&node_id, &content, "note", Some((&embedding, &model)));
-                        let _ = reply.send(serde_json::json!({"stored": true, "embedding_dim": embedding.len()}));
+                    CortexCmd::LearnWithEmbedding { node_id, content, embedding: _, model: _ } => {
+                        // SPIM only — embedding is ignored, vector is dead, store is WORD→MEMORY→POSITION
+                        let _ = cortex.ingest(&node_id, &content, "note");
+                        let _ = reply.send(serde_json::json!({"stored": true, "embedding_dim": 0, "store": "spim"}));
                     }
                     CortexCmd::RecallWithProtocol { query, density, limit, think_in, output_needed, prepared, model } => {
                         let mems = cortex.recall_with_protocol(
@@ -113,20 +115,15 @@ pub struct ServerState {
 
 impl ServerState {
     pub fn new(cfg: &AppConfig) -> Self {
-        let protocol = if cfg.embed_enabled {
-            match Protocol::new(&cfg.embed_model) {
-                Ok(p) => {
-                    println!("[intueina] protocol loaded: {}", cfg.embed_model);
-                    Some(Arc::new(p))
-                }
-                Err(err) => {
-                    eprintln!("[intueina] protocol failed to load (disabling): {}", err);
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // SPIM only — protocol with embeddings is retired, store is WORD→MEMORY→POSITION
+        if cfg.embed_enabled {
+            eprintln!("[intueina] embed_enabled forced false — SPIM is lossless, no vectors");
+        }
+        let protocol = None;
+        // Enforce SPIM DB — only ~/.intueina/cortex.json SPIM1
+        if !cfg.cortex_db_path.ends_with("cortex.json") {
+            eprintln!("[intueina] cortex_db_path forced to SPIM DB {}", cfg.cortex_db_path);
+        }
 
         let (tx, _) = broadcast::channel(64);
 
