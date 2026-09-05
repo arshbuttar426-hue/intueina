@@ -152,10 +152,11 @@ impl Cortex {
                 };
                 if has_tag { continue; }
             }
-            // Generate 5 tags via SPIM's processing layer — split what chain for LIKE
+            // Generate 5 tags via SPIM's processing layer — split what+topo for partial match (typo tolerance)
             let tags = positional_memory::tag::tag(&w);
             let what_parts = tags.what.strip_prefix("what:").unwrap_or(&tags.what).replace('_', " ");
-            let tag_content = format!("{} {} {} {} {} {}", w, tags.len, tags.topo, what_parts, tags.ent, tags.res);
+            let topo_parts = tags.topo.replace('_', " ");
+            let tag_content = format!("{} {} {} {} {} {}", w, tags.len, topo_parts, what_parts, tags.ent, tags.res);
             inner.insert_text(&tag_content);
         }
         drop(inner);
@@ -183,9 +184,58 @@ impl Cortex {
         let effective_limit = match density { "minimal"=>3, "balanced"=>5, "dense"=>10, _=>limit };
         let inner = self.inner.lock();
         eprintln!("[recall] q='{}' toks={:?} mems={} c3={:?}", query, tokenize(query), inner.num_memories, inner.match_c3(query).0);
-        // Inherent lexical understanding disabled for fresh DB single-word stability — use pure positional
+        // Inherent lexical understanding: expand via ALL 5 stickers — len/topo/what/ent/res
         let query_words: Vec<String> = tokenize(query);
-        let expanded_hits: Vec<u32> = Vec::new();
+        let mut expanded_hits: Vec<u32> = Vec::new();
+        if query_words.len()==1 {
+            let w = &query_words[0];
+            let tags = positional_memory::tag::tag(w);
+            let what_prefix = tags.what.split(':').nth(1).and_then(|s| s.split('_').next()).unwrap_or("").to_string();
+            let mut related_set = std::collections::HashSet::new();
+            // collect all 5 stickers
+            let mut stickers: Vec<String> = Vec::new();
+            stickers.push(tags.len.clone());
+            stickers.push(tags.ent.clone());
+            stickers.push(tags.res.clone());
+            if !what_prefix.is_empty() && what_prefix!="unknown" { stickers.push(what_prefix.clone()); }
+            // topo split into fingers for partial shape match
+            let topo_parts: Vec<String> = tags.topo.split('_').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+            for sticker in stickers {
+                if sticker.len()<2 { continue; }
+                let leaked: &'static str = Box::leak(sticker.into_boxed_str());
+                let tag_hits = inner.and_query(&[leaked]);
+                for mid in tag_hits.iter().take(15) {
+                    if let Some(content) = inner.reconstruct_string(*mid) {
+                        if let Some(word) = content.split_whitespace().next() {
+                            if word != w.as_str() { related_set.insert(word.to_string()); }
+                        }
+                    }
+                }
+            }
+            // topo fingers — need ≥2 shared
+            if !topo_parts.is_empty() {
+                let mut part_hits: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for p in topo_parts.iter() {
+                    let leaked: &'static str = Box::leak(p.clone().into_boxed_str());
+                    let hits = inner.and_query(&[leaked]);
+                    for mid in hits.iter() {
+                        if let Some(content) = inner.reconstruct_string(*mid) {
+                            if let Some(word) = content.split_whitespace().next() {
+                                if word != w.as_str() { *part_hits.entry(word.to_string()).or_insert(0) += 1; }
+                            }
+                        }
+                    }
+                }
+                let mut ranked: Vec<(String, usize)> = part_hits.into_iter().filter(|(_, cnt)| *cnt>=2).collect();
+                ranked.sort_by(|a,b| b.1.cmp(&a.1));
+                for (word, _) in ranked.into_iter().take(10) { related_set.insert(word); }
+                eprintln!("[5-sticker] w='{}' len={} topo={:?} what={} ent={} res={} related {} sample {:?}", w, tags.len, topo_parts, what_prefix, tags.ent, tags.res, related_set.len(), related_set.iter().take(5).collect::<Vec<_>>());
+            }
+            for rw in related_set {
+                let hits = inner.and_query(&[rw.as_str()]);
+                expanded_hits.extend(hits);
+            }
+        }
         // Positional recall: try exact phrase first, then AND, then BM25, plus expanded hits
         let mut hits: Vec<u32> = inner.match_c3(query).0;
         eprintln!("[recall] c3 hits={:?}", hits);
@@ -194,20 +244,38 @@ impl Cortex {
             hits = inner.and_query(&toks_ref);
             eprintln!("[recall] and_query {:?} hits={:?}", toks_ref, hits);
         }
-        // Merge expanded lexical hits
-        hits.extend(expanded_hits);
-        hits.sort_unstable();
-        hits.dedup();
+        // Merge expanded lexical hits only if no real hits yet (avoid polluting exact matches)
+        // Check if hits contain at least one real (non-tag) memory
+        let has_real = hits.iter().any(|mid| {
+            if let Some(txt) = inner.reconstruct_string(*mid) {
+                let is_tag = txt.split_whitespace().nth(1).is_some_and(|t| t.starts_with("len")) && txt.contains(" ent") && txt.contains(" res");
+                !is_tag
+            } else { false }
+        });
+        if !has_real {
+            hits.extend(expanded_hits);
+        } else {
+            eprintln!("[recall] has_real true, skipping expanded_hits {} to keep exact", expanded_hits.len());
+        }
+        // dedup preserving relevance order (not sorted by id)
+        {
+            let mut seen = std::collections::HashSet::new();
+            let mut deduped = Vec::new();
+            for id in hits { if seen.insert(id) { deduped.push(id); } }
+            hits = deduped;
+        }
         if hits.is_empty() {
             let ranked = inner.bm25(query, 1.5, 0.75);
             hits = ranked.iter().take(effective_limit).map(|(m,_)| *m).collect();
+        } else {
+            hits.truncate(effective_limit);
         }
-        hits.sort_unstable();
-        hits.truncate(effective_limit);
         let mut out = Vec::new();
         for mid in &hits {
             if let Some(content) = inner.reconstruct_string(*mid) {
-                if content.contains("len:") || content.contains("what:") { continue; }
+                // Tag filter — 5-tag funnel memories contain " len<digit> ... entX resXX" (cortex.rs:158)
+                let is_tag = content.split_whitespace().nth(1).is_some_and(|t| t.starts_with("len")) && content.contains(" ent") && content.contains(" res");
+                if is_tag { continue; }
                 let tokens = tokenize(query);
                 let matched: Vec<String> = filter_content_words(&tokens).into_iter().filter(|t| contains_word(&content, t)).collect();
                 let total = filter_content_words(&tokenize(&content)).len();
@@ -217,6 +285,8 @@ impl Cortex {
         if out.is_empty() && !hits.is_empty() {
             for mid in hits.iter().take(effective_limit) {
                 if let Some(content) = inner.reconstruct_string(*mid) {
+                    let is_tag = content.split_whitespace().nth(1).is_some_and(|t| t.starts_with("len")) && content.contains(" ent") && content.contains(" res");
+                    if is_tag { continue; }
                     out.push(MemoryNode{ node_id: mid.to_string(), content: content.clone(), memory_type: "note".into(), score: 0.5, matched_words: vec![], total_content_words: filter_content_words(&tokenize(&content)).len() });
                     if out.len()>=effective_limit { break; }
                 }
